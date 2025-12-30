@@ -27,7 +27,7 @@ SpiConfig cfg {
 IIM42652 imu(cfg);
 
 imu.init();
-imu.set_offset_acc_x(-0.5);
+// imu.set_offset_acc_x(-0.5);
 ```
 
 ### Sample data
