@@ -67,7 +67,7 @@ while (true)
 }
 ```
 
-### Offset compensation
+## Offset compensation
 
 ![Orientation](assets/orientations.png)
 
