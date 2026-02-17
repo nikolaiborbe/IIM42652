@@ -10,15 +10,41 @@
 
 #include "IIM42652.h"
 
-constexpr int16_t be16_to_i16(uint8_t msb, uint8_t lsb)
+constexpr s16 be16_to_i16(u8 msb, u8 lsb)
 {
-    return static_cast<int16_t>((static_cast<uint16_t>(msb) << 8) | static_cast<uint16_t>(lsb));
+    return static_cast<s16>((static_cast<u16>(msb) << 8) | static_cast<u16>(lsb));
 }
 
-constexpr float be16_to_float(uint8_t msb, uint8_t lsb) { return static_cast<float>(be16_to_i16(msb, lsb)); }
+constexpr float be16_to_float(u8 msb, u8 lsb) { return static_cast<float>(be16_to_i16(msb, lsb)); }
 
-void IIM42652::_CS_LOW() { HAL_GPIO_WritePin(m_spi.cs_port, m_spi.cs_pin, GPIO_PIN_RESET); }
-void IIM42652::_CS_HIGH() { HAL_GPIO_WritePin(m_spi.cs_port, m_spi.cs_pin, GPIO_PIN_SET); }
+void IIM42652::_cs_low() { HAL_GPIO_WritePin(m_spi.cs_port, m_spi.cs_pin, GPIO_PIN_RESET); }
+void IIM42652::_cs_high() { HAL_GPIO_WritePin(m_spi.cs_port, m_spi.cs_pin, GPIO_PIN_SET); }
+
+LOGGER::STATUS IIM42652::_spi_transmit(u8* data, u16 len)
+{
+    _cs_low();
+    HAL_StatusTypeDef status = HAL_SPI_Transmit(m_spi.hspi, data, len, SPI_TIMEOUT_MS);
+    _cs_high();
+    return (status == HAL_OK) ? LOGGER::STATUS::OK : LOGGER::STATUS::LOGGER_ERROR;
+}
+
+LOGGER::STATUS IIM42652::_spi_receive(u8 reg, u8* data, u16 len)
+{
+    u8 tx_reg = (reg & 0x7F) | 0x80;
+    _cs_low();
+    HAL_StatusTypeDef status = HAL_SPI_Transmit(m_spi.hspi, &tx_reg, 1, SPI_TIMEOUT_MS);
+    if (status == HAL_OK) {
+        status = HAL_SPI_Receive(m_spi.hspi, data, len, SPI_TIMEOUT_MS);
+    }
+    _cs_high();
+    return (status == HAL_OK) ? LOGGER::STATUS::OK : LOGGER::STATUS::LOGGER_ERROR;
+}
+
+LOGGER::STATUS IIM42652::_write_reg(u8 reg, u8 value)
+{
+    u8 tx[2] = { static_cast<u8>(reg & 0x7F), value };
+    return _spi_transmit(tx, 2);
+}
 
 float IIM42652::_accel_sensitivity_scale_factor_from_full_range_width(ACCEL_FS_SEL full_scale_select)
 {
@@ -46,9 +72,9 @@ float IIM42652::_gyro_sensitivity_scale_factor_from_full_range_width(GYRO_FS_SEL
     }
 }
 
-uint8_t IIM42652::_toggle_accel_gyro_temp(DEVICE_STATUS st)
+LOGGER::STATUS IIM42652::_toggle_accel_gyro_temp(DEVICE_STATUS st)
 {
-    uint8_t val {};
+    u8 val {};
 
     switch (st) {
     // see page 80 in datasheet.
@@ -56,241 +82,142 @@ uint8_t IIM42652::_toggle_accel_gyro_temp(DEVICE_STATUS st)
     case DEVICE_STATUS::ON: val = (0u << 5) | (3u << 2) | 3u; break;
     }
 
-    std::array<uint8_t, 2> tx = { PWR_MGMT0, val };
-    _CS_LOW();
-    HAL_StatusTypeDef tx_status = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    u8 tx[2]              = { (PWR_MGMT0 & 0x7F), val };
+    LOGGER::STATUS status = _spi_transmit(tx, 2);
     HAL_Delay(45); // delay for turing on Gyroscope.
 
-    if (tx_status != HAL_OK)
-        return 1;
-
-    return 0;
+    return status;
 }
 
-uint8_t IIM42652::_soft_reset()
+LOGGER::STATUS IIM42652::_soft_reset()
 {
-    uint8_t reg               = DEVICE_CONFIG;
-    uint8_t enable_reset      = 0x01;
-    std::array<uint8_t, 2> tx = { reg, enable_reset };
-
-    _CS_LOW();
-    HAL_StatusTypeDef tx_status = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
+    u8 tx[2]              = { (DEVICE_CONFIG & 0x7F), 0x01 };
+    LOGGER::STATUS status = _spi_transmit(tx, 2);
     HAL_Delay(1); // required by sensor (see datasheet)
-
-    if (tx_status != HAL_OK)
-        return 1;
-
-    return 0;
+    return status;
 }
 
-uint8_t IIM42652::init()
+LOGGER::STATUS IIM42652::init()
 {
     HAL_Delay(1);
 
-    if (_soft_reset() != 0)
-        return 1;
+    // Reset and power down for configuration
+    if (_soft_reset() != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
+    if (_toggle_accel_gyro_temp(DEVICE_STATUS::OFF) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
 
-    if (_toggle_accel_gyro_temp(DEVICE_STATUS::OFF) != 0)
-        return 1;
+    // Verify device identity
+    u8 id {};
+    if (_get_device_id(id) != LOGGER::STATUS::OK || id != WHO_AM_I_RESPONSE_ID)
+        return LOGGER::STATUS::LOGGER_ERROR;
 
-    // make sure it's the correct device
-    uint8_t id {};
-    if (_get_device_id(id) != 0)
-        return 1;
-    if (id != WHO_AM_I_RESPONSE_ID)
-        return 1;
+    // Configure accelerometer
+    m_accel_cfg
+        = { ACCEL_FS_SEL_16g, ACCEL_ODR_1kHz, ACCEL_UI_FILT_BW_4, ACCEL_UI_FILT_ORD_2nd, ACCEL_DEC2_M2_ORD_3rd };
+    if (_set_config_accelerometer() != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
 
-    // set accel configs
-    m_accel_cfg.accel_fs_sel      = ACCEL_FS_SEL_16g;
-    m_accel_cfg.accel_odr         = ACCEL_ODR_1kHz;
-    m_accel_cfg.accel_ui_filt_bw  = ACCEL_UI_FILT_BW_4;
-    m_accel_cfg.accel_ui_filt_ord = ACCEL_UI_FILT_ORD_2nd;
-    m_accel_cfg.accel_dec2_m2_ord = ACCEL_DEC2_M2_ORD_3rd;
+    // Configure gyroscope
+    m_gyro_cfg = { GYRO_FS_SEL_2000, GYRO_ODR_1kHz, GYRO_UI_FILT_ORD_2nd, GYRO_UI_FILT_BW_4, GYRO_DEC2_M2_ORD_3rd };
+    if (_set_config_gyro() != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
 
-    // set gyro configs
-    m_gyro_cfg.gyro_fs_sel      = GYRO_FS_SEL_2000;
-    m_gyro_cfg.gyro_odr         = GYRO_ODR_1kHz;
-    m_gyro_cfg.gyro_ui_filt_ord = GYRO_UI_FILT_ORD_2nd;
-    m_gyro_cfg.gyro_ui_filt_bw  = GYRO_UI_FILT_BW_4;
-    m_gyro_cfg.gyro_dec2_m2_ord = GYRO_DEC2_M2_ORD_3rd;
+    // Configure shared filter bandwidth
+    u8 filt_bw = (m_accel_cfg.accel_ui_filt_bw << 4) | m_gyro_cfg.gyro_ui_filt_bw;
+    if (_write_reg(GYRO_ACCEL_CONFIG0, filt_bw) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
 
-    uint8_t status_gyro_config = _set_config_gyro();
-    if (status_gyro_config != 0)
-        return status_gyro_config;
-
-    uint8_t status_acc_config = _set_config_accelerometer();
-    if (status_acc_config != 0)
-        return status_acc_config;
-
-    // calculate LSB scale factors
+    // Precompute sensitivity scale factors
     m_accel_lsb_per_g
         = _accel_sensitivity_scale_factor_from_full_range_width(static_cast<ACCEL_FS_SEL>(m_accel_cfg.accel_fs_sel));
     m_gyro_lsb_per_degree
         = _gyro_sensitivity_scale_factor_from_full_range_width(static_cast<GYRO_FS_SEL>(m_gyro_cfg.gyro_fs_sel));
 
-    // GYRO_ACCEL_CONFIG0
-    std::array<uint8_t, 2> tx = { GYRO_ACCEL_CONFIG0, 0 };
-    tx[1] |= m_accel_cfg.accel_ui_filt_bw << 4;
-    tx[1] |= m_gyro_cfg.gyro_ui_filt_bw;
-    _CS_LOW();
-    HAL_StatusTypeDef tx_status = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    // Power on sensors
+    if (_toggle_accel_gyro_temp(DEVICE_STATUS::ON) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
+
+    return LOGGER::STATUS::OK;
+}
+
+LOGGER::STATUS IIM42652::_set_config_accelerometer()
+{
+    // ACCEL_CONFIG0
+    u8 tx0[2] = { (ACCEL_CONFIG0 & 0x7F), 0 };
+    tx0[1] |= m_accel_cfg.accel_fs_sel << 5;
+    tx0[1] |= m_accel_cfg.accel_odr;
+    if (_spi_transmit(tx0, 2) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
     HAL_Delay(1);
 
-    if (tx_status != HAL_OK)
-        return 1;
+    // ACCEL_CONFIG1
+    u8 tx1[2] = { (ACCEL_CONFIG1 & 0x7F), 0 };
+    tx1[1] |= m_accel_cfg.accel_ui_filt_ord << 3;
+    tx1[1] |= m_accel_cfg.accel_dec2_m2_ord << 1;
+    if (_spi_transmit(tx1, 2) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
+    HAL_Delay(1);
 
-    if (_toggle_accel_gyro_temp(DEVICE_STATUS::ON) != 0)
-        return 1;
-
-    return 0;
+    return LOGGER::STATUS::OK;
 }
 
-uint8_t IIM42652::_set_config_accelerometer()
+LOGGER::STATUS IIM42652::_set_config_gyro()
 {
-    HAL_StatusTypeDef status_config0 = HAL_ERROR, status_config1 = HAL_ERROR;
-
-    {
-        // ACCEL_CONFIG0
-        std::array<uint8_t, 2> tx = { ACCEL_CONFIG0, 0 };
-        tx[1] |= m_accel_cfg.accel_fs_sel << 5;
-        tx[1] |= m_accel_cfg.accel_odr;
-
-        _CS_LOW();
-        status_config0 = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-        _CS_HIGH();
-        HAL_Delay(1);
-    }
-
-    {
-        // ACCEL_CONFIG1
-        std::array<uint8_t, 2> tx = { ACCEL_CONFIG1, 0 };
-        tx[1] |= m_accel_cfg.accel_ui_filt_ord << 3;
-        tx[1] |= m_accel_cfg.accel_dec2_m2_ord << 1;
-
-        _CS_LOW();
-        status_config1 = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-        _CS_HIGH();
-        HAL_Delay(1);
-    }
-
-    if ((status_config0 != HAL_OK) || (status_config1 != HAL_OK))
-        return 1;
-
-    return 0;
-}
-
-uint8_t IIM42652::_set_config_gyro()
-{
-    HAL_StatusTypeDef status_config0 = HAL_ERROR, status_config1 = HAL_ERROR;
-
-    std::array<uint8_t, 2> tx0 = { GYRO_CONFIG0, 0 };
+    u8 tx0[2] = { (GYRO_CONFIG0 & 0x7F), 0 };
     tx0[1] |= m_gyro_cfg.gyro_fs_sel << 5;
     tx0[1] |= m_gyro_cfg.gyro_odr;
-
-    _CS_LOW();
-    status_config0 = HAL_SPI_Transmit(m_spi.hspi, tx0.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    if (_spi_transmit(tx0, 2) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
     HAL_Delay(1);
 
-    std::array<uint8_t, 2> tx1 = { GYRO_CONFIG1, 0 };
+    u8 tx1[2] = { (GYRO_CONFIG1 & 0x7F), 0 };
     tx1[1] |= m_gyro_cfg.gyro_ui_filt_ord << 2;
     tx1[1] |= m_gyro_cfg.gyro_dec2_m2_ord;
-
-    _CS_LOW();
-    status_config1 = HAL_SPI_Transmit(m_spi.hspi, tx1.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    if (_spi_transmit(tx1, 2) != LOGGER::STATUS::OK)
+        return LOGGER::STATUS::LOGGER_ERROR;
     HAL_Delay(1);
 
-    if ((status_config0 != HAL_OK) || (status_config1 != HAL_OK))
-        return 1;
-
-    return 0;
+    return LOGGER::STATUS::OK;
 }
 
 TemperatureData IIM42652::read_temperature()
 {
-    TemperatureData temperature_in_celsius {};
-    HAL_StatusTypeDef status = HAL_ERROR;
-
-    std::array<uint8_t, 2> rx_buffer {};
-    uint8_t reg = TEMP_DATA1_UI | 0x80;
-
-    _CS_LOW();
-    status = HAL_SPI_TransmitReceive(
-        m_spi.hspi, &reg, rx_buffer.data(), static_cast<uint16_t>(rx_buffer.size()), SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    if (status != HAL_OK) {
+    u8 rx[2] = {};
+    if (_spi_receive(TEMP_DATA1_UI, rx, 2) != LOGGER::STATUS::OK) {
         return TemperatureData { false, 0.f };
     }
 
     // convert data from: DATA[15:8], DATA[7:0] -> DATA[15:0]
-    float raw_assembled                = be16_to_float(rx_buffer[0], rx_buffer[1]);
-    temperature_in_celsius.valid       = true;
-    temperature_in_celsius.temperature = (raw_assembled / 132.48f) + 25.f; // convertion from datasheet
-
-    return temperature_in_celsius;
+    float raw_assembled = be16_to_float(rx[0], rx[1]);
+    return TemperatureData { true, (raw_assembled / 132.48f) + 25.f };
 }
 
 AccelerationData IIM42652::read_acceleration()
 {
-    AccelerationData acceleration_data {};
-    HAL_StatusTypeDef status = HAL_ERROR;
-
-    std::array<uint8_t, 6> rx_buffer {};
-    uint8_t reg = ACCEL_DATA_X1_UI | 0x80;
-
-    _CS_LOW();
-    status = HAL_SPI_TransmitReceive(
-        m_spi.hspi, &reg, rx_buffer.data(), static_cast<uint16_t>(rx_buffer.size()), SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    if (status != HAL_OK)
+    u8 rx[6] = { 0 };
+    if (_spi_receive(ACCEL_DATA_X1_UI, rx, 6) != LOGGER::STATUS::OK)
         return AccelerationData { false, 0.f, 0.f, 0.f };
 
     // convert data from: DATA[15:8], DATA[7:0] -> DATA[15:0]
-    std::array<float, 3> raw_assembled { be16_to_float(rx_buffer[0], rx_buffer[1]),
-        be16_to_float(rx_buffer[2], rx_buffer[3]), be16_to_float(rx_buffer[4], rx_buffer[5]) };
+    float raw_assembled[3] { be16_to_float(rx[0], rx[1]), be16_to_float(rx[2], rx[3]), be16_to_float(rx[4], rx[5]) };
 
     // convert to ±g
-    acceleration_data.valid = true;
-    acceleration_data.acc_x = raw_assembled[0] / m_accel_lsb_per_g;
-    acceleration_data.acc_y = raw_assembled[1] / m_accel_lsb_per_g;
-    acceleration_data.acc_z = raw_assembled[2] / m_accel_lsb_per_g;
-
-    return acceleration_data;
+    return AccelerationData { true, raw_assembled[0] / m_accel_lsb_per_g, raw_assembled[1] / m_accel_lsb_per_g,
+        raw_assembled[2] / m_accel_lsb_per_g };
 }
 
 GyroData IIM42652::read_gyroscope()
 {
-    GyroData gyro_data {};
-    HAL_StatusTypeDef status = HAL_ERROR;
-
-    std::array<uint8_t, 6> rx_buffer {};
-    uint8_t reg = GYRO_DATA_X1_UI | 0x80;
-
-    _CS_LOW();
-    status = HAL_SPI_TransmitReceive(
-        m_spi.hspi, &reg, rx_buffer.data(), static_cast<uint16_t>(rx_buffer.size()), SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    if (status != HAL_OK)
+    u8 rx[6] = {};
+    if (_spi_receive(GYRO_DATA_X1_UI, rx, 6) != LOGGER::STATUS::OK)
         return GyroData { false, 0.f, 0.f, 0.f };
 
     // convert data from: DATA[15:8], DATA[7:0] -> DATA[15:0]
-    std::array<float, 3> raw_assembled { be16_to_float(rx_buffer[0], rx_buffer[1]),
-        be16_to_float(rx_buffer[2], rx_buffer[3]), be16_to_float(rx_buffer[4], rx_buffer[5]) };
+    float raw_assembled[3] = { be16_to_float(rx[0], rx[1]), be16_to_float(rx[2], rx[3]), be16_to_float(rx[4], rx[5]) };
 
-    gyro_data.valid  = true;
-    gyro_data.gyro_x = raw_assembled[0] / m_gyro_lsb_per_degree;
-    gyro_data.gyro_y = raw_assembled[1] / m_gyro_lsb_per_degree;
-    gyro_data.gyro_z = raw_assembled[2] / m_gyro_lsb_per_degree;
-
-    return gyro_data;
+    return GyroData { true, raw_assembled[0] / m_gyro_lsb_per_degree, raw_assembled[1] / m_gyro_lsb_per_degree,
+        raw_assembled[2] / m_gyro_lsb_per_degree };
 }
 
 GyroData IIM42652::get_last_gyroscope()
@@ -304,7 +231,6 @@ GyroData IIM42652::get_last_gyroscope()
 AccelerationData IIM42652::get_last_acceleration()
 {
     if (!m_sensor_data.acc) {
-
         return AccelerationData { false, 0.f, 0.f, 0.f };
     }
     return m_sensor_data.acc.value();
@@ -318,189 +244,134 @@ TemperatureData IIM42652::get_last_temperature()
     return m_sensor_data.temperature.value();
 }
 
-uint8_t IIM42652::read(ImuData& data)
+LOGGER::STATUS IIM42652::read(ImuData& data)
 {
-    uint8_t status = _spi_receive_data_from_register();
+    LOGGER::STATUS status = _spi_receive_data_from_register();
     data                  = m_sensor_data;
     return status;
 }
 
-uint8_t IIM42652::sample_data()
+LOGGER::STATUS IIM42652::sample_data()
 {
-    uint8_t status = _spi_receive_data_from_register();
+    LOGGER::STATUS status = _spi_receive_data_from_register();
     return status;
 }
 
-uint8_t IIM42652::_get_device_id(uint8_t& id)
+LOGGER::STATUS IIM42652::_get_device_id(u8& id)
 {
-    HAL_StatusTypeDef status = HAL_ERROR;
-
-    uint8_t reg = WHO_AM_I | 0x80;
-    uint8_t rx_buffer {};
-
-    _CS_LOW();
-    status = HAL_SPI_TransmitReceive(m_spi.hspi, &reg, &rx_buffer, 1, SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    if (status != HAL_OK)
-        return 1;
-
-    id = rx_buffer;
-
-    return 0;
+    u8 rx                 = 0;
+    LOGGER::STATUS status = _spi_receive(WHO_AM_I, &rx, 1);
+    id                    = rx;
+    return status;
 }
 
-uint8_t IIM42652::_spi_receive_data_from_register()
+LOGGER::STATUS IIM42652::_spi_receive_data_from_register()
 {
-    AccelerationData acceleration_data {};
-    GyroData gyro_data {};
-    TemperatureData temperature_in_celsius {};
-    HAL_StatusTypeDef status = HAL_ERROR;
-
-    constexpr std::size_t buffer_size = 14;
-    std::array<uint8_t, buffer_size> rx_buffer {};
-
-    uint8_t reg = TEMP_DATA1_UI | 0x80;
-
-    _CS_LOW();
-    status = HAL_SPI_TransmitReceive(
-        m_spi.hspi, &reg, rx_buffer.data(), static_cast<uint16_t>(rx_buffer.size()), SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    if (status != HAL_OK) {
+    u8 rx[14] = { 0 };
+    if (_spi_receive(TEMP_DATA1_UI, rx, 14) != LOGGER::STATUS::OK) {
         m_sensor_data.valid = false;
-        return 1;
+        return LOGGER::STATUS::LOGGER_ERROR;
     }
 
     // convert data from: DATA[15:8], DATA[7:0] -> DATA[15:0]
-    std::array<float, 7> raw_assembled { be16_to_float(rx_buffer[0], rx_buffer[1]),
-        be16_to_float(rx_buffer[2], rx_buffer[3]), be16_to_float(rx_buffer[4], rx_buffer[5]),
-        be16_to_float(rx_buffer[6], rx_buffer[7]), be16_to_float(rx_buffer[8], rx_buffer[9]),
-        be16_to_float(rx_buffer[10], rx_buffer[11]), be16_to_float(rx_buffer[12], rx_buffer[13]) };
+    float raw_assembled[7] = { be16_to_float(rx[0], rx[1]), be16_to_float(rx[2], rx[3]), be16_to_float(rx[4], rx[5]),
+        be16_to_float(rx[6], rx[7]), be16_to_float(rx[8], rx[9]), be16_to_float(rx[10], rx[11]),
+        be16_to_float(rx[12], rx[13]) };
 
-    temperature_in_celsius.valid       = true;
-    temperature_in_celsius.temperature = (raw_assembled[0] / 132.48f) + 25.f; // convertion from datasheet
+    TemperatureData temperature_in_celsius { true, (raw_assembled[0] / 132.48f) + 25.f };
 
-    // convert to ±g
-    acceleration_data.valid = true;
-    acceleration_data.acc_x = raw_assembled[1] / m_accel_lsb_per_g;
-    acceleration_data.acc_y = raw_assembled[2] / m_accel_lsb_per_g;
-    acceleration_data.acc_z = raw_assembled[3] / m_accel_lsb_per_g;
+    AccelerationData acceleration_data { true, raw_assembled[1] / m_accel_lsb_per_g,
+        raw_assembled[2] / m_accel_lsb_per_g, raw_assembled[3] / m_accel_lsb_per_g };
 
-    gyro_data.valid  = true;
-    gyro_data.gyro_x = raw_assembled[4] / m_gyro_lsb_per_degree;
-    gyro_data.gyro_y = raw_assembled[5] / m_gyro_lsb_per_degree;
-    gyro_data.gyro_z = raw_assembled[6] / m_gyro_lsb_per_degree;
+    GyroData gyro_data { true, raw_assembled[4] / m_gyro_lsb_per_degree, raw_assembled[5] / m_gyro_lsb_per_degree,
+        raw_assembled[6] / m_gyro_lsb_per_degree };
 
-    // TODO: BIG TIME WARNING, tx_time_get() should be used here
-    m_sensor_data = { true, temperature_in_celsius, gyro_data, acceleration_data, static_cast<ULONG>(1) };
+    m_sensor_data = { true, temperature_in_celsius, gyro_data, acceleration_data, tx_time_get() };
 
-    return 0;
+    return LOGGER::STATUS::OK;
 }
 
-uint8_t IIM42652::_bank_select(BANK_SEL bank)
+LOGGER::STATUS IIM42652::_bank_select(BANK_SEL bank)
 {
-    HAL_StatusTypeDef status  = HAL_ERROR;
-    std::array<uint8_t, 2> tx = { REG_BANK_SEL, static_cast<uint8_t>(bank) };
-
-    _CS_LOW();
-    status = HAL_SPI_Transmit(m_spi.hspi, tx.data(), 2, SPI_TIMEOUT_MS);
-    _CS_HIGH();
-
-    return (status == HAL_OK) ? 0 : 1;
+    u8 tx[2] = { (REG_BANK_SEL & 0x7F), static_cast<u8>(bank) };
+    return _spi_transmit(tx, 2);
 }
 
-uint8_t IIM42652::_get_register_value(const uint8_t reg)
+u8 IIM42652::_get_register_value(const u8 reg)
 {
-    uint8_t tx = reg | 0x80;
-    uint8_t rx {};
-
-    _CS_LOW();
-    HAL_SPI_TransmitReceive(m_spi.hspi, &tx, &rx, 1, SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    u8 rx = 0;
+    _spi_receive(reg, &rx, 1);
     return rx;
 }
 
-uint8_t IIM42652::set_offset_acc_x(float offset)
+LOGGER::STATUS IIM42652::set_offset_acc_x(float offset)
 {
-    constexpr float res      = 0.0005f;
-    constexpr int16_t min    = -2000;
-    constexpr int16_t max    = 2000;
-    HAL_StatusTypeDef status = HAL_ERROR;
+    constexpr float res = 0.0005f;
+    constexpr s16 min   = -2000;
+    constexpr s16 max   = 2000;
 
     _bank_select(BANK_SEL_4);
 
-    uint8_t upper_gyro_z = _get_register_value(OFFSET_USER4);
+    u8 upper_gyro_z = _get_register_value(OFFSET_USER4);
 
-    int16_t steps         = std::clamp(static_cast<int16_t>(std::lround(offset / res)), min, max);
-    uint16_t raw12        = static_cast<uint16_t>(steps) & 0x0FFF;
-    uint8_t lower         = static_cast<uint8_t>(raw12 & 0x00FF);
-    uint8_t upper         = static_cast<uint8_t>((raw12 >> 8) & 0x0F);
-    uint8_t propper_upper = (upper << 4) | upper_gyro_z; // combine previous gyro offset with new accel offset.
+    s16 steps        = std::clamp(static_cast<s16>(std::lround(offset / res)), min, max);
+    u16 raw12        = static_cast<u16>(steps) & 0x0FFF;
+    u8 lower         = static_cast<u8>(raw12 & 0x00FF);
+    u8 upper         = static_cast<u8>((raw12 >> 8) & 0x0F);
+    u8 propper_upper = (upper << 4) | (upper_gyro_z & 0x0F); // combine previous gyro offset with new accel offset.
 
-    uint8_t reg                     = OFFSET_USER4;
-    std::array<uint8_t, 3> tx_upper = { reg, propper_upper, lower };
-    _CS_LOW();
-    status = HAL_SPI_Transmit(m_spi.hspi, tx_upper.data(), tx_upper.size(), SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    u8 tx[3]              = { (OFFSET_USER4 & 0x7F), propper_upper, lower };
+    LOGGER::STATUS status = _spi_transmit(tx, 3);
 
     _bank_select(BANK_SEL_0);
 
-    return (status == HAL_OK) ? 0 : 1;
+    return status;
 }
 
-uint8_t IIM42652::set_offset_acc_y(float offset)
+LOGGER::STATUS IIM42652::set_offset_acc_y(float offset)
 {
-    constexpr float res      = 0.0005f;
-    constexpr int16_t min    = -2000;
-    constexpr int16_t max    = 2000;
-    HAL_StatusTypeDef status = HAL_ERROR;
+    constexpr float res = 0.0005f;
+    constexpr s16 min   = -2000;
+    constexpr s16 max   = 2000;
 
     _bank_select(BANK_SEL_4);
 
-    uint8_t upper_accel_z = _get_register_value(OFFSET_USER7);
+    u8 upper_accel_z = _get_register_value(OFFSET_USER7);
 
-    int16_t steps         = std::clamp(static_cast<int16_t>(std::lround(offset / res)), min, max);
-    uint16_t raw12        = static_cast<uint16_t>(steps) & 0x0FFF;
-    uint8_t lower         = static_cast<uint8_t>(raw12 & 0x00FF);
-    uint8_t upper         = static_cast<uint8_t>((raw12 >> 8) & 0x0F);
-    uint8_t propper_upper = (upper_accel_z & 0xF0) | upper; // combine previous accel offset with new accel offset.
+    s16 steps        = std::clamp(static_cast<s16>(std::lround(offset / res)), min, max);
+    u16 raw12        = static_cast<u16>(steps) & 0x0FFF;
+    u8 lower         = static_cast<u8>(raw12 & 0x00FF);
+    u8 upper         = static_cast<u8>((raw12 >> 8) & 0x0F);
+    u8 propper_upper = (upper_accel_z & 0xF0) | upper; // combine previous accel offset with new accel offset.
 
-    uint8_t reg                     = OFFSET_USER6;
-    std::array<uint8_t, 3> tx_upper = { reg, lower, propper_upper };
-    _CS_LOW();
-    status = HAL_SPI_Transmit(m_spi.hspi, tx_upper.data(), tx_upper.size(), SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    u8 tx[3]              = { (OFFSET_USER6 & 0x7F), lower, propper_upper };
+    LOGGER::STATUS status = _spi_transmit(tx, 3);
 
     _bank_select(BANK_SEL_0);
 
-    return (status == HAL_OK) ? 0 : 1;
+    return status;
 }
 
-uint8_t IIM42652::set_offset_acc_z(float offset)
+LOGGER::STATUS IIM42652::set_offset_acc_z(float offset)
 {
-    constexpr float res      = 0.0005f;
-    constexpr int16_t min    = -2000;
-    constexpr int16_t max    = 2000;
-    HAL_StatusTypeDef status = HAL_ERROR;
+    constexpr float res = 0.0005f;
+    constexpr s16 min   = -2000;
+    constexpr s16 max   = 2000;
 
     _bank_select(BANK_SEL_4);
 
-    uint8_t upper_accel_y = _get_register_value(OFFSET_USER7);
+    u8 upper_accel_y = _get_register_value(OFFSET_USER7);
 
-    int16_t steps         = std::clamp(static_cast<int16_t>(std::lround(offset / res)), min, max);
-    uint16_t raw12        = static_cast<uint16_t>(steps) & 0x0FFF;
-    uint8_t lower         = static_cast<uint8_t>(raw12 & 0x00FF);
-    uint8_t upper         = static_cast<uint8_t>((raw12 >> 8) & 0x0F);
-    uint8_t propper_upper = (upper << 4) | upper_accel_y; // combine previous accel offset with new accel offset.
+    s16 steps        = std::clamp(static_cast<s16>(std::lround(offset / res)), min, max);
+    u16 raw12        = static_cast<u16>(steps) & 0x0FFF;
+    u8 lower         = static_cast<u8>(raw12 & 0x00FF);
+    u8 upper         = static_cast<u8>((raw12 >> 8) & 0x0F);
+    u8 propper_upper = (upper << 4) | (upper_accel_y & 0x0F); // combine previous accel offset with new accel offset.
 
-    uint8_t reg                     = OFFSET_USER7;
-    std::array<uint8_t, 3> tx_upper = { reg, propper_upper, lower };
-    _CS_LOW();
-    status = HAL_SPI_Transmit(m_spi.hspi, tx_upper.data(), tx_upper.size(), SPI_TIMEOUT_MS);
-    _CS_HIGH();
+    u8 tx[3]              = { (OFFSET_USER7 & 0x7F), propper_upper, lower };
+    LOGGER::STATUS status = _spi_transmit(tx, 3);
 
     _bank_select(BANK_SEL_0);
 
-    return (status == HAL_OK) ? 0 : 1;
+    return status;
 }

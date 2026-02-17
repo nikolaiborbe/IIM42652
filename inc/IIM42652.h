@@ -11,13 +11,41 @@
 #ifndef IIM42652_H
 #define IIM42652_H
 
-#include "IMU.h"
+/**
+ * GUIDE:
+ * The sensor is NOT automatically initilized when you create an object. This means you need to call init() before using
+ * the IIM42652 object.
+ *
+ * It is recommended to use the read(ImuData &data) function. Both for safety, and for speed. If the user
+ * want to sample a specific type of data they can use the read_<type>() functions. There is also implementation to
+ * sample data from the entire register and only read the previous sampled data. You do this by first calling the
+ * sample_data() function and then the get_last_<type>().
+ *
+ * In the base class "IMU" there are two offset functions that should be used if you want to transform from the sensors
+ * axis to the rocket axis.
+ */
 
+#include "IMU.h"
+#include "logger.h"
+#include "main.h"
+#include "tx_api.h"
+
+
+#ifdef __cplusplus
 #include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <optional>
+#endif
+
+typedef unsigned long ULONG;
+
+// #include "stm32h7xx_hal_def.h"
+// #include "stm32h7xx_hal_gpio.h"
+// #include "stm32h7xx_hal_spi.h"
+// #include "tx_api.h"
 
 struct SpiConfig {
     // Chip select
@@ -26,46 +54,54 @@ struct SpiConfig {
 
     // Interrupt
     // GPIO_TypeDef *int_port;
-    uint16_t int_pin;
+    // uint16_t int_pin;
 
     // SPI handle
     SPI_HandleTypeDef* hspi;
 };
 
 struct AccelerometerConfig {
-    uint8_t accel_fs_sel;
-    uint8_t accel_odr;
-    uint8_t accel_ui_filt_bw;
-    uint8_t accel_ui_filt_ord;
-    uint8_t accel_dec2_m2_ord;
+    u8 accel_fs_sel;
+    u8 accel_odr;
+    u8 accel_ui_filt_bw;
+    u8 accel_ui_filt_ord;
+    u8 accel_dec2_m2_ord;
     // offset should also probably be here
 };
 
 struct GyroConfig {
-    uint8_t gyro_fs_sel;
-    uint8_t gyro_odr;
-    uint8_t gyro_ui_filt_ord;
-    uint8_t gyro_ui_filt_bw;
-    uint8_t gyro_dec2_m2_ord;
+    u8 gyro_fs_sel;
+    u8 gyro_odr;
+    u8 gyro_ui_filt_ord;
+    u8 gyro_ui_filt_bw;
+    u8 gyro_dec2_m2_ord;
 };
 
-class IIM42652 : public IMU<ImuData> {
+#ifdef __cplusplus
+class IIM42652 : public IMU<ImuData>{
+public:
+    IIM42652(const SpiConfig& spi)
+        : IMU<ImuData>(), m_spi(spi) { };
+
+private:
+    ImuData m_sensor_data {};
+
 private:
     /**
      * @brief Relevant data registers.
      */
-    static constexpr uint8_t TEMP_DATA1_UI      = 0x1D;
-    static constexpr uint8_t ACCEL_DATA_X1_UI   = 0x1F;
-    static constexpr uint8_t GYRO_DATA_X1_UI    = 0x25;
-    static constexpr uint8_t ACCEL_CONFIG0      = 0x50;
-    static constexpr uint8_t GYRO_ACCEL_CONFIG0 = 0x52;
-    static constexpr uint8_t ACCEL_CONFIG1      = 0x53;
-    static constexpr uint8_t GYRO_CONFIG0       = 0x4F;
-    static constexpr uint8_t GYRO_CONFIG1       = 0x51;
-    static constexpr uint8_t PWR_MGMT0          = 0x4E;
-    static constexpr uint8_t WHO_AM_I           = 0x75;
-    static constexpr uint8_t DEVICE_CONFIG      = 0x11;
-    static constexpr uint8_t REG_BANK_SEL       = 0x76;
+    static constexpr u8 TEMP_DATA1_UI      = 0x1D;
+    static constexpr u8 ACCEL_DATA_X1_UI   = 0x1F;
+    static constexpr u8 GYRO_DATA_X1_UI    = 0x25;
+    static constexpr u8 ACCEL_CONFIG0      = 0x50;
+    static constexpr u8 GYRO_ACCEL_CONFIG0 = 0x52;
+    static constexpr u8 ACCEL_CONFIG1      = 0x53;
+    static constexpr u8 GYRO_CONFIG0       = 0x4F;
+    static constexpr u8 GYRO_CONFIG1       = 0x51;
+    static constexpr u8 PWR_MGMT0          = 0x4E;
+    static constexpr u8 WHO_AM_I           = 0x75;
+    static constexpr u8 DEVICE_CONFIG      = 0x11;
+    static constexpr u8 REG_BANK_SEL       = 0x76;
 
     /**
      * @brief Values for acceleration config.
@@ -165,22 +201,19 @@ private:
     };
 
     // Others
-    static constexpr uint8_t ACCEL_UI_FILT_BW_4    = 0x01;
-    static constexpr uint8_t ACCEL_DEC2_M2_ORD_3rd = 0x02;
-    static constexpr uint8_t GYRO_UI_FILT_BW_4     = 0x01;
-    static constexpr uint8_t GYRO_DEC2_M2_ORD_3rd  = 0x02;
-    static constexpr uint8_t WHO_AM_I_RESPONSE_ID  = 0x6F;
+    static constexpr u8 ACCEL_UI_FILT_BW_4    = 0x01;
+    static constexpr u8 ACCEL_DEC2_M2_ORD_3rd = 0x02;
+    static constexpr u8 GYRO_UI_FILT_BW_4     = 0x01;
+    static constexpr u8 GYRO_DEC2_M2_ORD_3rd  = 0x02;
+    static constexpr u8 WHO_AM_I_RESPONSE_ID  = 0x6F;
 
 public:
-    IIM42652(const SpiConfig spi)
-        : m_spi(spi) { };
-
     /**
      * @brief Init function to setup configuration for the sensor.
      *
      * @return The status.
      */
-    uint8_t init();
+    LOGGER::STATUS init();
 
     /**
      * @brief Reads the value of the IIM42652 sensor.
@@ -189,28 +222,28 @@ public:
      *
      * @return The status.
      */
-    uint8_t read(ImuData& data);
+    LOGGER::STATUS read(ImuData& data);
 
     /**
      * @brief Read gyroscope data directly over SPI.
      *
      * @return Gyroscope data in degrees.
      */
-    GyroData read_gyroscope() override;
+    GyroData read_gyroscope();
 
     /**
      * @brief Read acceleration data directly over SPI.
      *
      * @return Acceleration data in G's.
      */
-    AccelerationData read_acceleration() override;
+    AccelerationData read_acceleration();
 
     /**
      * @brief Read temperature data directly over SPI.
      *
      * @return Themperature data converted to celcius.
      */
-    TemperatureData read_temperature() override;
+    TemperatureData read_temperature();
 
     /**
      * @brief Reads entire relevant memory register at once.
@@ -218,7 +251,7 @@ public:
      * @note The idea with this function is to read the entire relevant register with one SPI transfer instead of
      * multiple.
      */
-    uint8_t sample_data();
+    LOGGER::STATUS sample_data();
 
     /**
      * @brief Get the last gyroscope value sampled by calling sample_values().
@@ -257,7 +290,7 @@ public:
      *
      * @note Max value is ± 1 g. So, -0.55 is valid, 1.1 is not.
      */
-    uint8_t set_offset_acc_x(float offset) override;
+    LOGGER::STATUS set_offset_acc_x(float offset);
 
     /**
      * @brief Sets offset for the acceleration in the +- y direction.
@@ -266,7 +299,7 @@ public:
      *
      * @note Max value is ± 1 g. So, -0.55 is valid, 1.1 is not.
      */
-    uint8_t set_offset_acc_y(float offset) override;
+    LOGGER::STATUS set_offset_acc_y(float offset);
 
     /**
      * @brief Sets offset for the acceleration in the +- z direction.
@@ -275,17 +308,17 @@ public:
      *
      * @note Max value is ± 1 g. So, -0.55 is valid, 1.1 is not.
      */
-    uint8_t set_offset_acc_z(float offset) override;
-    
+    LOGGER::STATUS set_offset_acc_z(float offset);
+
     // Note: I could not make sense of gyroscope offset from the datasheet.
     // It looked like the only offset you can set is the sensitivity, not the initial
     // rotation, which is not that interesting.
-    // uint8_t set_offset_gyro_x(float offset) override;
-    // uint8_t set_offset_gyro_y(float offset) override;
-    // uint8_t set_offset_gyro_z(float offset) override;
+    // LOGGER::STATUS set_offset_gyro_x(float offset) override;
+    // LOGGER::STATUS set_offset_gyro_y(float offset) override;
+    // LOGGER::STATUS set_offset_gyro_z(float offset) override;
 
     // Note: No way to set offset on the device, better to calculate temperature offset by usecase.
-    // uint8_t set_offset_temp(float offset) override;
+    // LOGGER::STATUS set_offset_temp(float offset) override;
 
 private:
     /**
@@ -293,14 +326,14 @@ private:
      *
      * @return The status.
      */
-    uint8_t _set_config_accelerometer();
+    LOGGER::STATUS _set_config_accelerometer();
 
     /**
      * @brief Helper function to set the gyro configuration.
      *
      * @return The status.
      */
-    uint8_t _set_config_gyro();
+    LOGGER::STATUS _set_config_gyro();
 
     /**
      * @brief Helper function to get the byte scale factor for the acceleration data.
@@ -325,12 +358,12 @@ private:
     /**
      * @brief Helper function to read data over SPI.
      */
-    uint8_t _spi_receive_data_from_register();
+    LOGGER::STATUS _spi_receive_data_from_register();
 
     /**
      * @brief Get the device id from the WHO_AM_I register.
      */
-    uint8_t _get_device_id(uint8_t& id);
+    LOGGER::STATUS _get_device_id(u8& id);
 
     /**
      * @brief Turn Accel, Gyro, and Temperature off/on.
@@ -338,36 +371,62 @@ private:
      * @note This has to be done to modify the register values. See page 63 in datasheet.
      * https://product.tdk.com/system/files/dam/doc/product/sensor/mortion-inertial/imu/data_sheet/ds-000440-iim-42652-typ-v1.1.pdf
      */
-    uint8_t _toggle_accel_gyro_temp(DEVICE_STATUS st);
+    LOGGER::STATUS _toggle_accel_gyro_temp(DEVICE_STATUS st);
 
     /**
      * @brief Soft resets the IIM42652.
      */
-    uint8_t _soft_reset();
+    LOGGER::STATUS _soft_reset();
 
     /**
      * @brief Helper to set chip select low.
      */
-    void _CS_LOW();
+    void _cs_low();
 
     /**
      * @brief Helper to set chip select high.
      */
-    void _CS_HIGH();
+    void _cs_high();
+
+    /**
+     * @brief Transmit data over SPI.
+     *
+     * @param data Pointer to data buffer to transmit.
+     * @param len Number of bytes to transmit.
+     *
+     * @return The status.
+     */
+    LOGGER::STATUS _spi_transmit(u8* data, u16 len);
+
+    /**
+     * @brief Receive data from a register over SPI.
+     *
+     * @param reg Register address to read from (read bit will be set automatically).
+     * @param data Pointer to buffer to store received data.
+     * @param len Number of bytes to receive.
+     *
+     * @return The status.
+     */
+    LOGGER::STATUS _spi_receive(u8 reg, u8* data, u16 len);
+
+    /**
+     * @brief Write a single byte to a register.
+     */
+    LOGGER::STATUS _write_reg(u8 reg, u8 value);
 
     /**
      * @brief Helper to get the register value.
      *
      * @param reg Register address.
      */
-    uint8_t _get_register_value(const uint8_t reg);
-    
+    u8 _get_register_value(const u8 reg);
+
     /**
      * @brief Set the register bank.
      *
      * @param bank The register bank you want to select.
      */
-    uint8_t _bank_select(BANK_SEL bank);
+    LOGGER::STATUS _bank_select(BANK_SEL bank);
 
 private:
     SpiConfig m_spi;
@@ -378,9 +437,9 @@ private:
 };
 
 /**
- * @brief Convert two uint8_t [(1) msb, (2) lsb] -> to one int16_t <msb, lsb>.
+ * @brief Convert two u8 [(1) msb, (2) lsb] -> to one int16_t <msb, lsb>.
  *
- * @note Often in datasheets, the bits of large numbers will be split into two uint8_t's for transfer, this function
+ * @note Often in datasheets, the bits of large numbers will be split into two u8's for transfer, this function
  * combines them into a single number.
  *
  * @param msb Most significant byte
@@ -388,12 +447,12 @@ private:
  *
  * @return The combined value.
  */
-constexpr int16_t be16_to_i16(uint8_t msb, uint8_t lsb);
+constexpr s16 be16_to_i16(u8 msb, u8 lsb);
 
 /**
- * @brief Convert two uint8_t [(1) msb, (2) lsb] -> to one float.
+ * @brief Convert two u8 [(1) msb, (2) lsb] -> to one float.
  *
- * @note Often in datasheets, the bits of large numbers will be split into two uint8_t's for transfer, this function
+ * @note Often in datasheets, the bits of large numbers will be split into two u8's for transfer, this function
  * combines them into a single number.
  *
  * @param msb Most significant byte
@@ -401,6 +460,8 @@ constexpr int16_t be16_to_i16(uint8_t msb, uint8_t lsb);
  *
  * @return The combined value.
  */
-constexpr float be16_to_float(uint8_t msb, uint8_t lsb);
+constexpr float be16_to_float(u8 msb, u8 lsb);
+
+#endif
 
 #endif

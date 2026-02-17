@@ -8,6 +8,8 @@
 #ifndef QUATERNION_H
 #define QUATERNION_H
 
+#ifdef __cplusplus
+
 #include <math.h>
 
 // ---------- Tunables ----------
@@ -121,4 +123,6 @@ public:
     static const Quaternion fromAxisAngle(float x, float y, float z, float angle);
 };
 
+
+#endif
 #endif

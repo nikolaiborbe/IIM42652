@@ -11,8 +11,9 @@
 #ifndef IMU_H
 #define IMU_H
 
-#include "sensors.h"
-#include "quaternion.h"
+#include "logger.h"
+#include "main.h"
+#include <stdbool.h>
 
 struct GyroData {
     bool valid;
@@ -28,11 +29,32 @@ struct AccelerationData {
     float acc_y;
     float acc_z;
 };
-
 struct TemperatureData {
     bool valid;
     float temperature;
 };
+
+struct AccelerationOffset {
+    float acc_offset_x;
+    float acc_offset_y;
+    float acc_offset_z;
+};
+
+#ifdef __cplusplus
+#include "quaternion.h"
+#include <stdbool.h>
+#include <optional>
+
+#include <array>
+#include <cmath>
+#include <cstdint>
+#include <optional>
+
+constexpr uint32_t SPI_TIMEOUT_MS = 100;
+constexpr double G =
+    9.8214599692; // https://www.researchgate.net/publication/232822567_Absolute_gravity_values_in_Norway
+constexpr double PI = 3.141592653589;
+
 
 struct ImuData {
     bool valid;
@@ -41,7 +63,6 @@ struct ImuData {
     std::optional<AccelerationData> acc;
     ULONG timestamp;
 };
-
 // in radians
 struct Orientation {
     float z; // yaw
@@ -51,27 +72,15 @@ struct Orientation {
 
 enum class DEVICE_STATUS { ON, OFF };
 
-template <typename T> class IMU : public Sensor<T> {
-
+template <typename T> class IMU {
 public:
-    IMU()
-        : Sensor<T>()
-    {
-    }
-
-    std::optional<AccelerationData> convert_acceleration();
-
-    virtual GyroData read_gyroscope();
-    virtual TemperatureData read_temperature();
-    virtual AccelerationData read_acceleration();
-
-    virtual uint8_t set_offset_acc_x(float offset);
-    virtual uint8_t set_offset_acc_y(float offset);
-    virtual uint8_t set_offset_acc_z(float offset);
+    IMU() { }
 
 protected:
     ImuData m_sensor_data {};
 };
+
+namespace IMU_methods {
 
 /**
  * @brief Change the measured values depending on the IMU's orientation.
@@ -86,7 +95,7 @@ void accel_mount_offset(AccelerationData& data, const Orientation& e);
 
 /**
  * @brief Change the measured values depending on the IMU's orientation.
- * 
+ *
  * @param data Acceleration data.
  * @param orientation The orientation of IIM42652 in euler angles using YAW-PITCH-ROLL (Z-Y'-X'').
  *
@@ -94,5 +103,10 @@ void accel_mount_offset(AccelerationData& data, const Orientation& e);
  * https://product.tdk.com/system/files/dam/doc/product/sensor/mortion-inertial/imu/data_sheet/ds-000440-iim-42652-typ-v1.1.pdf
  */
 void gyro_mount_offset(GyroData& data, const Orientation& e);
+
+} // IMU_methods
+
+
+#endif
 
 #endif
